@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Scan,
@@ -14,19 +14,22 @@ import {
   Check,
   Clock,
   MapPin,
-  Star,
   Monitor,
   Calendar,
   User,
   Phone,
   ArrowLeft,
   Loader2,
+  AlertCircle,
+  TrendingUp,
+  Award,
+  Users,
 } from 'lucide-react';
 import { StatusBadge } from '../../components/ui/StatusBadge';
-import { useAppointmentStore } from '../../store/useAppointmentStore';
 import { useNotificationStore } from '../../store/useNotificationStore';
 import { useAuthStore } from '../../store/useAuthStore';
-import type { ExamType, BranchRecommendation, TimeSlot, HospitalBranch } from '../../types';
+import { examApi, appointmentApi } from '../../services/api';
+import type { ExamType, BranchRecommendation, TimeSlot } from '../../types';
 
 const iconMap: Record<string, React.ElementType> = {
   scan: Scan,
@@ -43,36 +46,91 @@ const stepTitles = ['选择检查类型', '选择院区', '选择时间段', '�
 
 export default function PatientAppointment() {
   const [currentStep, setCurrentStep] = useState(1);
+  const [examTypes, setExamTypes] = useState<ExamType[]>([]);
+  const [selectedExamType, setSelectedExamType] = useState<ExamType | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<BranchRecommendation | null>(null);
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<TimeSlot | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>(
     new Date().toISOString().split('T')[0]
   );
+  const [recommendations, setRecommendations] = useState<BranchRecommendation[]>([]);
+  const [availableTimeSlots, setAvailableTimeSlots] = useState<TimeSlot[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
-
-  const {
-    examTypes,
-    selectedExamType,
-    setSelectedExamType,
-    recommendations,
-    generateRecommendations,
-    getAvailableTimeSlots,
-    addAppointment,
-  } = useAppointmentStore();
+  const [error, setError] = useState<string | null>(null);
 
   const { addNotification } = useNotificationStore();
   const { currentUser } = useAuthStore();
 
-  const availableTimeSlots = useMemo(() => {
-    if (!selectedBranch || !selectedExamType) return [];
-    return getAvailableTimeSlots(selectedBranch.branch.id, selectedExamType.id, selectedDate);
-  }, [selectedBranch, selectedExamType, selectedDate, getAvailableTimeSlots]);
+  useEffect(() => {
+    const fetchExamTypes = async () => {
+      setIsLoading(true);
+      try {
+        const data = await examApi.getExamTypes();
+        setExamTypes(data);
+      } catch (err) {
+        console.error('获取检查类型失败:', err);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchExamTypes();
+  }, []);
+
+  const fetchRecommendations = useCallback(async (examTypeId: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const data = await examApi.getRecommendations(examTypeId);
+      setRecommendations(data);
+      if (data.length === 0) {
+        setError('暂无可用院区，请选择其他检查类型');
+      }
+    } catch (err) {
+      console.error('获取推荐院区失败:', err);
+      setError('获取推荐院区失败，请稍后重试');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const fetchTimeSlots = useCallback(async (branchId: string, examTypeId: string) => {
+    setIsLoading(true);
+    try {
+      const data = await examApi.getTimeSlots({
+        branchId,
+        examTypeId,
+        date: selectedDate,
+      });
+      setAvailableTimeSlots(data);
+    } catch (err) {
+      console.error('获取时间段失败:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [selectedDate]);
 
   const handleSelectExamType = (examType: ExamType) => {
     setSelectedExamType(examType);
-    generateRecommendations(examType.id);
+    setSelectedBranch(null);
+    setSelectedTimeSlot(null);
+    fetchRecommendations(examType.id);
   };
+
+  const handleSelectBranch = (branch: BranchRecommendation) => {
+    setSelectedBranch(branch);
+    setSelectedTimeSlot(null);
+    if (selectedExamType) {
+      fetchTimeSlots(branch.branch.id, selectedExamType.id);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedBranch && selectedExamType && currentStep === 3) {
+      fetchTimeSlots(selectedBranch.branch.id, selectedExamType.id);
+    }
+  }, [selectedDate, selectedBranch, selectedExamType, currentStep, fetchTimeSlots]);
 
   const handleNext = () => {
     if (currentStep === 1 && selectedExamType) {
@@ -96,43 +154,55 @@ export default function PatientAppointment() {
     setSelectedBranch(null);
     setSelectedTimeSlot(null);
     setIsSuccess(false);
+    setRecommendations([]);
+    setAvailableTimeSlots([]);
   };
 
   const handleSubmit = async () => {
     if (!selectedExamType || !selectedBranch || !selectedTimeSlot || !currentUser) return;
 
     setIsSubmitting(true);
+    setError(null);
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const newAppointment = await appointmentApi.createAppointment({
+        patientId: currentUser.id,
+        patientName: currentUser.name,
+        patientPhone: currentUser.phone,
+        doctorId: 'doctor-1',
+        doctorName: '王医生',
+        examTypeId: selectedExamType.id,
+        examTypeName: selectedExamType.name,
+        branchId: selectedBranch.branch.id,
+        branchName: selectedBranch.branch.name,
+        deviceId: 'dev-1',
+        deviceName: '设备-01',
+        date: selectedDate,
+        timeSlot: selectedTimeSlot.time,
+        status: 'pending',
+        isUrgent: false,
+      });
 
-    addAppointment({
-      patientId: currentUser.id,
-      patientName: currentUser.name,
-      patientPhone: currentUser.phone,
-      doctorId: 'doctor-1',
-      doctorName: '王医生',
-      examTypeId: selectedExamType.id,
-      examTypeName: selectedExamType.name,
-      branchId: selectedBranch.branch.id,
-      branchName: selectedBranch.branch.name,
-      deviceId: 'dev-1',
-      deviceName: '设备-01',
-      date: selectedDate,
-      timeSlot: selectedTimeSlot.time,
-      status: 'pending',
-      isUrgent: false,
-    });
+      if (newAppointment) {
+        addNotification({
+          userId: currentUser.id,
+          type: 'appointment',
+          title: '预约申请已提交',
+          content: `您已成功预约${selectedBranch.branch.name}${selectedExamType.name}，时间为${selectedDate} ${selectedTimeSlot.time}，请等待确认。`,
+          relatedId: newAppointment.id,
+          relatedType: 'appointment',
+        });
 
-    addNotification({
-      userId: currentUser.id,
-      type: 'appointment',
-      title: '预约申请已提交',
-      content: `您已成功预约${selectedBranch.branch.name}${selectedExamType.name}，时间为${selectedDate} ${selectedTimeSlot.time}，请等待确认。`,
-      relatedType: 'appointment',
-    });
-
-    setIsSubmitting(false);
-    setIsSuccess(true);
+        setIsSubmitting(false);
+        setIsSuccess(true);
+      } else {
+        throw new Error('预约创建失败');
+      }
+    } catch (err) {
+      console.error('提交预约失败:', err);
+      setError('预约提交失败，请稍后重试');
+      setIsSubmitting(false);
+    }
   };
 
   const canProceed = () => {
@@ -146,6 +216,18 @@ export default function PatientAppointment() {
       default:
         return false;
     }
+  };
+
+  const getScoreColor = (score: number) => {
+    if (score >= 80) return 'text-green-600';
+    if (score >= 60) return 'text-yellow-600';
+    return 'text-red-600';
+  };
+
+  const getScoreLabel = (score: number) => {
+    if (score >= 80) return '推荐';
+    if (score >= 60) return '一般';
+    return '不推荐';
   };
 
   if (isSuccess) {
@@ -259,8 +341,25 @@ export default function PatientAppointment() {
       </div>
 
       <div className="max-w-4xl mx-auto px-4 py-6">
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center gap-3"
+          >
+            <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+            <p className="text-red-700">{error}</p>
+          </motion.div>
+        )}
+
+        {isLoading && (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+          </div>
+        )}
+
         <AnimatePresence mode="wait">
-          {currentStep === 1 && (
+          {!isLoading && currentStep === 1 && (
             <motion.div
               key="step1"
               initial={{ opacity: 0, x: 20 }}
@@ -325,7 +424,7 @@ export default function PatientAppointment() {
             </motion.div>
           )}
 
-          {currentStep === 2 && (
+          {!isLoading && currentStep === 2 && (
             <motion.div
               key="step2"
               initial={{ opacity: 0, x: 20 }}
@@ -335,7 +434,7 @@ export default function PatientAppointment() {
             >
               <h2 className="text-lg font-semibold text-gray-900 mb-2">选择就诊院区</h2>
               <p className="text-gray-500 mb-4">
-                系统为您推荐以下院区，综合考虑了等待时间、设备利用率和距离因素
+                系统为您智能推荐以下院区，综合考虑了设备忙闲度、排队人数和距离因素
               </p>
               <div className="space-y-4">
                 {recommendations.map((rec, index) => {
@@ -348,91 +447,106 @@ export default function PatientAppointment() {
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: index * 0.1 }}
                       whileHover={{ scale: 1.01 }}
-                      whileTap={{ scale: 0.99 }}
-                      onClick={() => setSelectedBranch(rec)}
-                      className={`relative p-5 rounded-2xl border-2 cursor-pointer transition-all ${
+                      onClick={() => handleSelectBranch(rec)}
+                      className={`relative p-6 rounded-2xl border-2 cursor-pointer transition-all ${
                         isSelected
                           ? 'border-blue-500 bg-blue-50'
                           : 'border-gray-200 bg-white hover:border-blue-300'
                       }`}
                     >
+                      {index === 0 && (
+                        <div className="absolute -top-3 -left-3">
+                          <span className="inline-flex items-center gap-1 px-3 py-1 bg-gradient-to-r from-yellow-400 to-orange-500 text-white text-xs font-bold rounded-full shadow-lg">
+                            <Award className="w-3 h-3" />
+                            最优推荐
+                          </span>
+                        </div>
+                      )}
                       {isSelected && (
                         <div className="absolute top-3 right-3 w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center">
                           <Check className="w-4 h-4 text-white" />
                         </div>
                       )}
-
-                      {index === 0 && (
-                        <div className="absolute top-3 left-3">
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                            最优推荐
-                          </span>
-                        </div>
-                      )}
-
                       <div className="flex items-start justify-between">
                         <div className="flex-1">
-                          <h3 className="font-semibold text-gray-900 text-lg">
-                            {rec.branch.name}
-                          </h3>
-                          <p className="text-sm text-gray-500 mt-1 flex items-center gap-1">
+                          <div className="flex items-center gap-3">
+                            <h3 className="text-xl font-bold text-gray-900">
+                              {rec.branch.name}
+                            </h3>
+                            <span
+                              className={`text-lg font-bold ${getScoreColor(rec.score)}`}
+                            >
+                              {rec.score}分
+                            </span>
+                            <StatusBadge
+                              status={getScoreLabel(rec.score) === '推荐' ? 'confirmed' : getScoreLabel(rec.score) === '一般' ? 'pending' : 'cancelled'}
+                            />
+                          </div>
+                          <p className="text-gray-500 mt-2 flex items-center gap-2">
                             <MapPin className="w-4 h-4" />
                             {rec.branch.address}
                           </p>
-                          <p className="text-sm text-gray-500 flex items-center gap-1 mt-1">
-                            <Phone className="w-4 h-4" />
-                            {rec.branch.phone}
-                          </p>
-                        </div>
-
-                        <div className="flex flex-col items-center">
-                          <div className="w-16 h-16 rounded-full bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center text-white">
-                            <div className="text-center">
-                              <div className="text-xl font-bold">{rec.score}</div>
-                              <div className="text-xs opacity-80">推荐分</div>
+                          <div className="flex flex-wrap gap-6 mt-4">
+                            <div className="flex items-center gap-2">
+                              <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+                                <Clock className="w-5 h-5 text-blue-600" />
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500">平均等待</p>
+                                <p className="font-semibold text-gray-800">
+                                  约{rec.avgWaitTime}分钟
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
+                                <Monitor className="w-5 h-5 text-green-600" />
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500">可用设备</p>
+                                <p className="font-semibold text-gray-800">
+                                  {rec.deviceCount}台
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
+                                <Users className="w-5 h-5 text-purple-600" />
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500">可预约时段</p>
+                                <p className="font-semibold text-gray-800">
+                                  {rec.availableSlots.filter((s) => s.available).length}个
+                                </p>
+                              </div>
                             </div>
                           </div>
-                          <div className="flex items-center mt-1">
-                            {[...Array(5)].map((_, i) => (
-                              <Star
-                                key={i}
-                                className={`w-3 h-3 ${
-                                  i < Math.round(rec.score / 20)
-                                    ? 'text-yellow-400 fill-yellow-400'
-                                    : 'text-gray-300'
-                                }`}
+                        </div>
+                        <div className="flex flex-col items-end">
+                          <div className="w-20 h-20 rounded-full border-4 border-gray-200 flex items-center justify-center relative">
+                            <svg className="w-full h-full -rotate-90">
+                              <circle
+                                cx="40"
+                                cy="40"
+                                r="34"
+                                fill="none"
+                                stroke="#e5e7eb"
+                                strokeWidth="6"
                               />
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-3 gap-4 mt-4 pt-4 border-t border-gray-100">
-                        <div className="text-center">
-                          <div className="flex items-center justify-center gap-1 text-gray-500">
-                            <Clock className="w-4 h-4" />
-                            <span className="text-sm">平均等待</span>
-                          </div>
-                          <div className="text-lg font-semibold text-gray-900 mt-1">
-                            {rec.avgWaitTime}分钟
-                          </div>
-                        </div>
-                        <div className="text-center">
-                          <div className="flex items-center justify-center gap-1 text-gray-500">
-                            <Monitor className="w-4 h-4" />
-                            <span className="text-sm">可用设备</span>
-                          </div>
-                          <div className="text-lg font-semibold text-gray-900 mt-1">
-                            {rec.deviceCount}台
-                          </div>
-                        </div>
-                        <div className="text-center">
-                          <div className="flex items-center justify-center gap-1 text-gray-500">
-                            <Calendar className="w-4 h-4" />
-                            <span className="text-sm">可预约</span>
-                          </div>
-                          <div className="text-lg font-semibold text-gray-900 mt-1">
-                            {rec.availableSlots.filter((s) => s.available).length}个
+                              <circle
+                                cx="40"
+                                cy="40"
+                                r="34"
+                                fill="none"
+                                stroke={rec.score >= 80 ? '#10b981' : rec.score >= 60 ? '#f59e0b' : '#ef4444'}
+                                strokeWidth="6"
+                                strokeDasharray={`${(rec.score / 100) * 213.6} 213.6`}
+                                strokeLinecap="round"
+                              />
+                            </svg>
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <TrendingUp className={`w-6 h-6 ${getScoreColor(rec.score)}`} />
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -443,7 +557,7 @@ export default function PatientAppointment() {
             </motion.div>
           )}
 
-          {currentStep === 3 && (
+          {!isLoading && currentStep === 3 && (
             <motion.div
               key="step3"
               initial={{ opacity: 0, x: 20 }}
@@ -451,61 +565,63 @@ export default function PatientAppointment() {
               exit={{ opacity: 0, x: -20 }}
               transition={{ duration: 0.3 }}
             >
-              <h2 className="text-lg font-semibold text-gray-900 mb-2">选择预约时间</h2>
+              <h2 className="text-lg font-semibold text-gray-900 mb-2">选择时间段</h2>
               <p className="text-gray-500 mb-4">
                 {selectedBranch?.branch.name} - {selectedExamType?.name}
               </p>
 
-              <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-6">
-                <label className="text-sm font-medium text-gray-700 mb-2 block">选择日期</label>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
-                  min={new Date().toISOString().split('T')[0]}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
-                />
+              <div className="bg-white rounded-xl p-4 mb-6 shadow-card">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  选择日期
+                </label>
+                <div className="flex items-center gap-3">
+                  <Calendar className="w-5 h-5 text-gray-400" />
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    onChange={(e) => setSelectedDate(e.target.value)}
+                    min={new Date().toISOString().split('T')[0]}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
               </div>
 
-              <div className="bg-white rounded-2xl border border-gray-200 p-4">
-                <label className="text-sm font-medium text-gray-700 mb-4 block">选择时间段</label>
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                  {availableTimeSlots.map((slot, index) => {
-                    const isSelected = selectedTimeSlot?.time === slot.time;
+              <div className="bg-white rounded-xl p-4 shadow-card">
+                <h3 className="font-medium text-gray-800 mb-4">可预约时间段</h3>
+                {availableTimeSlots.length === 0 ? (
+                  <div className="text-center py-8 text-gray-500">
+                    该日期暂无可用时间段
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">
+                    {availableTimeSlots.map((slot) => {
+                      const isSelected = selectedTimeSlot?.time === slot.time;
+                      const isFull = !slot.available;
 
-                    return (
-                      <motion.button
-                        key={slot.time}
-                        initial={{ opacity: 0, scale: 0.9 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ delay: index * 0.02 }}
-                        whileHover={slot.available ? { scale: 1.05 } : {}}
-                        whileTap={slot.available ? { scale: 0.95 } : {}}
-                        onClick={() => slot.available && setSelectedTimeSlot(slot)}
-                        disabled={!slot.available}
-                        className={`p-3 rounded-xl border-2 text-center transition-all ${
-                          !slot.available
-                            ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
-                            : isSelected
-                            ? 'bg-blue-50 border-blue-500 text-blue-700'
-                            : 'bg-white border-gray-200 hover:border-blue-300 text-gray-700'
-                        }`}
-                      >
-                        <div className="font-medium">{slot.time}</div>
-                        <div className="text-xs mt-1">
-                          {slot.available
-                            ? `剩余 ${slot.capacity - slot.booked}/${slot.capacity}`
-                            : '已满'}
-                        </div>
-                      </motion.button>
-                    );
-                  })}
-                </div>
+                      return (
+                        <button
+                          key={slot.time}
+                          onClick={() => !isFull && setSelectedTimeSlot(slot)}
+                          disabled={isFull}
+                          className={`p-2 text-sm rounded-lg font-medium transition-all ${
+                            isFull
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed line-through'
+                              : isSelected
+                              ? 'bg-blue-600 text-white shadow-md'
+                              : 'bg-gray-50 text-gray-700 hover:bg-blue-50 hover:text-blue-600 border border-gray-200'
+                          }`}
+                        >
+                          {slot.time}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </motion.div>
           )}
 
-          {currentStep === 4 && (
+          {!isLoading && currentStep === 4 && (
             <motion.div
               key="step4"
               initial={{ opacity: 0, x: 20 }}
@@ -514,142 +630,97 @@ export default function PatientAppointment() {
               transition={{ duration: 0.3 }}
             >
               <h2 className="text-lg font-semibold text-gray-900 mb-4">确认预约信息</h2>
-
-              <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                <div className="p-5 border-b border-gray-100">
-                  <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                    <User className="w-5 h-5 text-blue-500" />
-                    患者信息
-                  </h3>
-                  <div className="grid grid-cols-2 gap-4">
+              <div className="bg-white rounded-2xl shadow-card overflow-hidden">
+                <div className="bg-gradient-to-r from-blue-500 to-blue-600 p-6 text-white">
+                  <h3 className="text-xl font-bold mb-1">{selectedExamType?.name}</h3>
+                  <p className="text-blue-100">{selectedExamType?.category}</p>
+                </div>
+                <div className="p-6 space-y-4">
+                  <div className="flex items-center gap-3 pb-4 border-b border-gray-100">
+                    <User className="w-5 h-5 text-gray-400" />
                     <div>
-                      <span className="text-sm text-gray-500">姓名</span>
-                      <p className="font-medium text-gray-900">{currentUser?.name}</p>
-                    </div>
-                    <div>
-                      <span className="text-sm text-gray-500">手机号</span>
-                      <p className="font-medium text-gray-900">{currentUser?.phone}</p>
+                      <p className="text-sm text-gray-500">患者信息</p>
+                      <p className="font-medium text-gray-800">
+                        {currentUser?.name}
+                        <span className="text-gray-400 ml-2">{currentUser?.phone}</span>
+                      </p>
                     </div>
                   </div>
-                </div>
-
-                <div className="p-5 border-b border-gray-100">
-                  <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                    <Scan className="w-5 h-5 text-blue-500" />
-                    检查信息
-                  </h3>
-                  <div className="space-y-3">
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">检查项目</span>
-                      <span className="font-medium text-gray-900">{selectedExamType?.name}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">检查类型</span>
-                      <span className="font-medium text-gray-900">
-                        {selectedExamType?.category}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">预计时长</span>
-                      <span className="font-medium text-gray-900">
-                        {selectedExamType?.duration}分钟
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">检查费用</span>
-                      <span className="font-bold text-blue-600">¥{selectedExamType?.price}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-5 border-b border-gray-100">
-                  <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                    <MapPin className="w-5 h-5 text-blue-500" />
-                    院区信息
-                  </h3>
-                  <div className="space-y-3">
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">院区名称</span>
-                      <span className="font-medium text-gray-900">
+                  <div className="flex items-center gap-3 pb-4 border-b border-gray-100">
+                    <MapPin className="w-5 h-5 text-gray-400" />
+                    <div>
+                      <p className="text-sm text-gray-500">就诊院区</p>
+                      <p className="font-medium text-gray-800">
                         {selectedBranch?.branch.name}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">院区地址</span>
-                      <span className="font-medium text-gray-900 text-right max-w-[60%]">
+                      </p>
+                      <p className="text-sm text-gray-500">
                         {selectedBranch?.branch.address}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">联系电话</span>
-                      <span className="font-medium text-gray-900">
-                        {selectedBranch?.branch.phone}
-                      </span>
+                      </p>
                     </div>
                   </div>
-                </div>
-
-                <div className="p-5">
-                  <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                    <Calendar className="w-5 h-5 text-blue-500" />
-                    预约时间
-                  </h3>
-                  <div className="space-y-3">
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">预约日期</span>
-                      <span className="font-medium text-gray-900">{selectedDate}</span>
+                  <div className="flex items-center gap-3 pb-4 border-b border-gray-100">
+                    <Calendar className="w-5 h-5 text-gray-400" />
+                    <div>
+                      <p className="text-sm text-gray-500">预约日期</p>
+                      <p className="font-medium text-gray-800">{selectedDate}</p>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">预约时段</span>
-                      <span className="font-medium text-gray-900">{selectedTimeSlot?.time}</span>
+                  </div>
+                  <div className="flex items-center gap-3 pb-4 border-b border-gray-100">
+                    <Clock className="w-5 h-5 text-gray-400" />
+                    <div>
+                      <p className="text-sm text-gray-500">预约时间</p>
+                      <p className="font-medium text-gray-800">
+                        {selectedTimeSlot?.time}
+                        <span className="text-gray-400 ml-2">
+                          (约{selectedExamType?.duration}分钟)
+                        </span>
+                      </p>
                     </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-gray-500">预约状态</span>
-                      <StatusBadge status="pending" />
-                    </div>
+                  </div>
+                  <div className="flex items-center justify-between pt-2">
+                    <span className="text-gray-600">检查费用</span>
+                    <span className="text-2xl font-bold text-blue-600">
+                      ¥{selectedExamType?.price}
+                    </span>
                   </div>
                 </div>
               </div>
-
-              <div className="mt-6 bg-blue-50 rounded-xl p-4">
-                <p className="text-sm text-blue-800">
-                  <strong>温馨提示：</strong>
-                  请于预约时间前30分钟到达院区，携带有效身份证件和相关检查资料。如需取消预约，请提前24小时操作。
+              <div className="mt-6 bg-yellow-50 border border-yellow-200 rounded-xl p-4">
+                <p className="text-sm text-yellow-800">
+                  <strong>温馨提示：</strong>请您在预约时间前30分钟到达医院，携带有效身份证件和相关检查资料。如无法按时就诊，请提前24小时取消预约。
                 </p>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <div className="mt-8 flex gap-4">
-          {currentStep > 1 && (
+        {!isLoading && currentStep < 4 && (
+          <div className="flex justify-between mt-8">
             <button
               onClick={handlePrev}
-              className="flex-1 px-6 py-4 border border-gray-300 rounded-xl font-medium text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+              disabled={currentStep === 1}
+              className="flex items-center gap-2 px-6 py-3 border border-gray-300 rounded-xl font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <ChevronLeft className="w-5 h-5" />
               上一步
             </button>
-          )}
-
-          {currentStep < 4 ? (
             <button
               onClick={handleNext}
               disabled={!canProceed()}
-              className={`flex-1 px-6 py-4 rounded-xl font-medium transition-colors flex items-center justify-center gap-2 ${
-                canProceed()
-                  ? 'bg-blue-600 text-white hover:bg-blue-700'
-                  : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-              }`}
+              className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               下一步
               <ChevronRight className="w-5 h-5" />
             </button>
-          ) : (
+          </div>
+        )}
+
+        {!isLoading && currentStep === 4 && (
+          <div className="flex justify-end mt-8">
             <button
               onClick={handleSubmit}
               disabled={isSubmitting}
-              className="flex-1 px-6 py-4 bg-green-600 text-white rounded-xl font-medium hover:bg-green-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              className="flex items-center gap-2 px-8 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSubmitting ? (
                 <>
@@ -663,8 +734,8 @@ export default function PatientAppointment() {
                 </>
               )}
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

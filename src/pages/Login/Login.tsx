@@ -39,7 +39,7 @@ export default function Login() {
 
   const onSubmit = async (data: LoginForm) => {
     setError('');
-    const success = login(data.username, data.password, data.role);
+    const success = await login(data.username, data.password, data.role);
     
     if (success) {
       const from = (location.state as { from?: Location })?.from?.pathname || `/${data.role}`;

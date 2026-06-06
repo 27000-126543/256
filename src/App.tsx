@@ -28,7 +28,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<MainLayout />}>
-          <Route index element={<Navigate to="/patient" replace />} />
+          <Route index element={<Navigate to="/login" replace />} />
           <Route path="notifications" element={<Notifications />} />
 
           <Route path="patient">
